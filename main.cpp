@@ -4,6 +4,8 @@
 #include <iostream>
 #include <cstddef>    
 #include <string>      
+#include <fstream>
+#include <iomanip>
 
 using word = uint32_t;
 using sword = int32_t;
@@ -47,6 +49,7 @@ struct CpuState
     bool exception = false;
     word getReg (uint8_t index) const { return regs[index];}
     void setReg (uint8_t index, word value) { regs[index] = value;}
+    void dump (bool full = false) const;
 };
 
 struct Memory
@@ -85,6 +88,30 @@ struct Memory
         data[addr + 2] = (value >> 16) & 0xFF;
         data[addr + 3] = (value >> 24) & 0xFF;
     }
+
+    void load_binary (const std::string& path, word base, CpuState* cpu)
+    {
+        std::ifstream file(path, std::ios::binary);
+        if (!file)
+        {
+            std::cerr << "Cannot open " << path << "\n";
+            cpu->halted = true;
+            return;
+        } 
+        
+        file.seekg(0, std::ios::end);
+        size_t size = file.tellg();
+        file.seekg(0);
+
+        if (base + size > data.size())
+        {
+            std::cerr << "Binary too large for memory\n";
+            cpu->halted = true;
+            return;
+        }
+
+        file.read(reinterpret_cast<char*>(data.data() + base), size);
+    }
 };
 
 sword sign_extend(word value, int bits) 
@@ -101,6 +128,61 @@ void SigException(CpuState* cpu, word num);
 void handle_syscall(CpuState* cpu);
 void handle_exception(CpuState* cpu);
 void run(CpuState* cpu);
+
+
+void CpuState::dump(bool full) const
+{
+    std::cout << "==========<(CPU dump)>===========\n";
+    std::cout << "PC = 0x" << std::hex << std::setw(8) << std::setfill('0')
+              << pc << std::dec << "  (" << pc << ")\n";
+
+    std::cout << "halted = "    << (halted    ? "true" : "false") << "\n";
+    std::cout << "exception = " << (exception ? "true" : "false") << "\n";
+
+    if (exception || cause != ExceptionCause::kNone) 
+    {
+        std::cout << "cause = " << static_cast<int>(cause)
+                  << "  value = 0x" << std::hex << exception_value
+                  << std::dec << "\n";
+    }
+
+    std::cout << "\nRegisters:\n";
+    for (int row = 0; row < 4; ++row) 
+    {
+        for (int col = 0; col < 8; ++col) 
+        {
+            int i = row * 8 + col;
+            std::cout << "r" << std::setw(2) << std::setfill(' ') << i << " = "
+                      << std::hex << std::setw(8) << std::setfill('0')
+                      << regs[i] << std::dec << "  ";
+        }
+        std::cout << "\n";
+    }
+
+    if (full && mem) 
+    {
+        std::cout << "\nMemory around PC (0x"
+                  << std::hex << pc << "):\n" << std::dec;
+
+        word start = (pc >= 16) ? pc - 16 : 0;
+        for (word addr = start; addr < start + 64; addr += 4) 
+        {
+            if (addr + 4 > mem->size()) break;
+
+            // Читаем байты напрямую — не трогаем флаги CPU.
+            word val = static_cast<word>(mem->data[addr])
+                     | (static_cast<word>(mem->data[addr + 1]) << 8)
+                     | (static_cast<word>(mem->data[addr + 2]) << 16)
+                     | (static_cast<word>(mem->data[addr + 3]) << 24);
+
+            std::cout << "  [0x" << std::hex << std::setw(8) << std::setfill('0')
+                      << addr << "] = 0x" << std::setw(8) << val
+                      << std::dec << "\n";
+        }
+    }
+
+    std::cout << "==============================\n";
+}
 
 Instruction decode(word encoding)
 {
@@ -377,6 +459,11 @@ void handle_syscall(CpuState* cpu)
 
     switch (num)
     {
+        case 1:
+        {
+            std::cout << static_cast<sword>(cpu->getReg(0));
+            break;
+        }
         case 64: 
         {
             word fd = cpu->getReg(0);
@@ -438,6 +525,8 @@ void run (CpuState* cpu)
     while (!cpu->halted)
     {
         word encoding = cpu->mem->read32(cpu->pc, cpu);
+        //cpu->dump();
+
         if (cpu->exception) 
         {
             handle_exception(cpu);
@@ -452,41 +541,21 @@ void run (CpuState* cpu)
     }   
 }
 
-int main() 
+int main(int argc, char** argv)
 {
     Memory mem(1 << 20);           // 1 МБ
     CpuState cpu;
     cpu.mem = &mem;
     cpu.pc = 0;
 
-    // Программа:
-    //   LI  X1, #0x200   ; buf
-    //   LI  X0, #1       ; fd = stdout
-    //   LI  X2, #6       ; count = 6
-    //   LI  X8, #64      ; syscall write
-    //   SYSCALL
-    //   LI  X8, #93      ; syscall exit
-    //   SYSCALL
-    // Данные по адресу 0x200: "Hello\n"
-
-    word prog[] = 
-    {
-        0x44010200,   // LI X1, #0x200
-        0x44000001,   // LI X0, #1
-        0x44020006,   // LI X2, #6
-        0x44080040,   // LI X8, #64
-        0x0000001D,   // SYSCALL
-        0x4408005D,   // LI X8, #93
-        0x0000001D,   // SYSCALL
-    };
-
-    for (size_t i = 0; i < sizeof(prog) / sizeof(prog[0]); ++i)
-        mem.write32(static_cast<word>(i * 4), prog[i], &cpu);
-
-    const char* msg = "Hello\n";
-    for (size_t i = 0; i < 6; ++i)
-        mem.data[0x200 + i] = static_cast<uint8_t>(msg[i]);
+    const char* path = (argc > 1) ? argv[1] : "output.bin";
+    mem.load_binary(path, 0, &cpu);
+    
+    if (cpu.halted) return 1;
 
     run(&cpu);
+
+    cpu.dump(true);
+
     return 0;
 }
