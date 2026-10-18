@@ -3,17 +3,16 @@
 #include <unordered_map>
 #include <iostream>
 #include <cstddef>    
-#include <string>      
+#include <string>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 
 using word = uint32_t;
-using sword = int32_t;
 
 enum class ExceptionCause 
 {
     kNone,
-    kSystemCall,
     kMisalignedAccess,
     kIllegalInstruction,
     kOutOfBounds
@@ -26,6 +25,29 @@ enum class Opcode
     kSelc, kAdd, kMovn, kLi, kSbit, kUnknown
 };
 
+const char* opcode_name(Opcode op) 
+{
+    switch (op) 
+    {
+        case Opcode::kBeq:      return "BEQ";
+        case Opcode::kSyscall:  return "SYSCALL";
+        case Opcode::kLd:       return "LD";
+        case Opcode::kSt:       return "ST";
+        case Opcode::kMovz:     return "MOVZ";
+        case Opcode::kAddi:     return "ADDI";
+        case Opcode::kCls:      return "CLS";
+        case Opcode::kStp:      return "STP";
+        case Opcode::kJ:        return "J";
+        case Opcode::kSsat:     return "SSAT";
+        case Opcode::kSelc:     return "SELC";
+        case Opcode::kAdd:      return "ADD";
+        case Opcode::kMovn:     return "MOVN";
+        case Opcode::kLi:       return "LI";
+        case Opcode::kSbit:     return "SBIT";
+        default:                return "UNKNOWN";
+    }
+}
+
 struct Memory;
 
 struct Instruction 
@@ -33,16 +55,24 @@ struct Instruction
     Opcode op = Opcode::kUnknown;
     uint8_t rd = 0, rs = 0, rt = 0;
     uint8_t rs1 = 0, rs2 = 0, rt1 = 0, rt2 = 0, base = 0;
-    sword imm = 0;
+    int32_t imm = 0;
     uint32_t imm5 = 0;
     uint32_t instr_index = 0;
 };
+
+struct BasicBlock
+    {
+        std::vector<Instruction> instrs;
+    };
+
 
 struct CpuState
 {
     word regs[32] = {};
     word pc = 0;
     Memory* mem = nullptr;
+    bool syscall_pending = false;
+    word syscall_num = 0;
     ExceptionCause cause = ExceptionCause::kNone;
     word exception_value = 0;
     bool halted = false;
@@ -50,6 +80,7 @@ struct CpuState
     word getReg (uint8_t index) const { return regs[index];}
     void setReg (uint8_t index, word value) { regs[index] = value;}
     void dump (bool full = false) const;
+    std::unordered_map<word, BasicBlock> bb_cache;
 };
 
 struct Memory
@@ -60,33 +91,17 @@ struct Memory
 
     size_t size() const { return data.size(); }
 
-    word read32 (word addr, CpuState* cpu) const //склеиваем так потому что хитровытраханный литлендиан
+    bool read32 (word addr, word& out) const //склеиваем так потому что хитровытраханный литлендиан
     {
-        if (addr + 4 > data.size()) 
-        {
-            cpu->exception = true;
-            cpu->cause = ExceptionCause::kOutOfBounds;
-            cpu->exception_value = addr;
-            return 0;
-        }
-        word b0 = data[addr];
-        word b1 = data[addr + 1];
-        word b2 = data[addr + 2];
-        word b3 = data[addr + 3];
-        return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+        if (data.size() < 4 || addr > data.size() - 4) return false;
+        std::memcpy(&out, &data[addr], 4);
+        return true;
     }
-    void write32 (word addr, word value, CpuState* cpu) 
+    bool write32 (word addr, word value) 
     {
-        if (addr + 4 > data.size()) {
-            cpu->exception = true;
-            cpu->cause = ExceptionCause::kOutOfBounds;
-            cpu->exception_value = addr;
-            return;
-        }
-        data[addr]     = value & 0xFF;
-        data[addr + 1] = (value >> 8) & 0xFF;
-        data[addr + 2] = (value >> 16) & 0xFF;
-        data[addr + 3] = (value >> 24) & 0xFF;
+        if (data.size() < 4 || addr > data.size() - 4) return false; 
+        std::memcpy(&data[addr], &value, 4);
+        return true;
     }
 
     void load_binary (const std::string& path, word base, CpuState* cpu)
@@ -114,21 +129,31 @@ struct Memory
     }
 };
 
-sword sign_extend(word value, int bits) 
+// sext<15, 32>(m);
+
+template<int FromBits, int ToBits>
+constexpr int32_t setx(uint32_t value)
 {
-    word mask = 1u << (bits - 1);
-    return static_cast<sword>((value ^ mask) - mask);
+    static_assert(FromBits > 0,         "FromBits must be > 0");
+    static_assert(FromBits < ToBits,    "FromBits must be < ToBits");
+    static_assert(ToBits <= 32,         "ToBits must be <= 32");
+
+    constexpr uint32_t from_mask = (1u << FromBits) - 1u;
+    value &= from_mask;
+    constexpr uint32_t sign_bit = 1u << (FromBits - 1);
+    if (value & sign_bit)
+        return static_cast<int32_t>(value - (1u << FromBits));
+    return static_cast<int32_t>(value);
 }
 
 bool isAligned(word addr) { return (addr & 0x3) == 0; }
 
 Instruction decode(word encoding);
 void execute(CpuState* cpu, const Instruction& instr);
-void SigException(CpuState* cpu, word num);
 void handle_syscall(CpuState* cpu);
 void handle_exception(CpuState* cpu);
 void run(CpuState* cpu);
-
+BasicBlock& build_bb (CpuState* cpu, word entry_pc);
 
 void CpuState::dump(bool full) const
 {
@@ -179,6 +204,59 @@ void CpuState::dump(bool full) const
                       << addr << "] = 0x" << std::setw(8) << val
                       << std::dec << "\n";
         }
+    }
+
+    if (full && !bb_cache.empty())
+    {
+        std::cout << "\nBB cache(size" << bb_cache.size() <<" blocks):\n";
+        
+        for (const auto& [addr, bb] : bb_cache)
+        {
+            std::cout << " [0x" 
+                      << std::hex <<std::setw(8) << std::setfill('0') 
+                      << addr << "]" << std::dec 
+                      << "  " << bb.instrs.size() << "instr(s)\n";
+            
+            for (size_t i = 0; i < bb.instrs.size(); ++i)
+            {
+                const auto& ins = bb.instrs[i];
+                word insn_pc = addr + static_cast<word>(i * 4); 
+
+                std::cout << "      0x" << std::hex << std::setw(8)
+                          << std::setfill('0') << insn_pc
+                          << std::setfill(' ') << std::dec << "  "
+                          << std::setw(8) << std::left << opcode_name(ins.op)
+                          << std::right;
+
+            if (ins.rd || ins.rs || ins.rt) {
+                    std::cout << " rd=" << (int)ins.rd
+                              << " rs=" << (int)ins.rs
+                              << " rt=" << (int)ins.rt;
+                }
+                if (ins.imm) {
+                    std::cout << " imm=" << ins.imm;
+                }
+                if (ins.imm5) {
+                    std::cout << " imm5=" << ins.imm5;
+                }
+                if (ins.base) {
+                    std::cout << " base=" << (int)ins.base;
+                }
+                if (ins.rt1 || ins.rt2) {
+                    std::cout << " rt1=" << (int)ins.rt1
+                              << " rt2=" << (int)ins.rt2;
+                }
+                if (ins.rs1 || ins.rs2) {
+                    std::cout << " rs1=" << (int)ins.rs1
+                              << " rs2=" << (int)ins.rs2;
+                }
+                if (ins.instr_index) {
+                    std::cout << " idx=" << ins.instr_index;
+                }
+                std::cout << "\n";
+            }
+        }
+
     }
 
     std::cout << "==============================\n";
@@ -291,7 +369,7 @@ Instruction decode(word encoding)
     return instr;
 }
 
-void execude (CpuState* cpu, const Instruction& instr)
+void execute (CpuState* cpu, const Instruction& instr)
 {
     word old_pc = cpu->pc;
     bool pc_updated = false;
@@ -300,8 +378,8 @@ void execude (CpuState* cpu, const Instruction& instr)
     {
         case Opcode::kBeq:
         {
-            sword offset = sign_extend(instr.imm, 16);
-            sword target = offset << 2;
+            int32_t offset = setx<16, 32>(instr.imm);
+            int32_t target = offset * 4;
             if (cpu->getReg(instr.rs) == cpu->getReg(instr.rt))
                 cpu->pc = cpu->pc + target;
             else
@@ -312,12 +390,13 @@ void execude (CpuState* cpu, const Instruction& instr)
         }
         case Opcode::kSyscall:
         {
-            SigException(cpu, cpu->getReg(8)); //x8 - num of syscall
+            cpu->syscall_pending = true;
+            cpu->syscall_num = cpu->getReg(8); //x8 - num of syscall
             break;
         }
         case Opcode::kLd:
         {
-            word addr = cpu->getReg(instr.base) + sign_extend(instr.imm, 14);
+            word addr = cpu->getReg(instr.base) + setx<14, 32>(instr.imm);
             if (!isAligned(addr))
             {
                 cpu->exception = true;
@@ -326,9 +405,12 @@ void execude (CpuState* cpu, const Instruction& instr)
                 pc_updated = true; 
                 break;
             }
-            word value = cpu->mem->read32(addr, cpu);
-            if (cpu->exception) 
+            word value;
+            if (!cpu->mem->read32(addr, value)) 
             {
+                cpu->exception = true;
+                cpu->cause = ExceptionCause::kOutOfBounds;
+                cpu->exception_value = addr;
                 pc_updated = true;
                 break;
             }
@@ -337,15 +419,23 @@ void execude (CpuState* cpu, const Instruction& instr)
         }
         case Opcode::kSt:
         {
-            word addr = cpu->getReg(instr.base) + sign_extend(instr.imm, 14);
+            word addr = cpu->getReg(instr.base) + setx<14, 32>(instr.imm);
             if (!isAligned(addr))
             {
                 cpu->exception = true;
                 cpu->cause = ExceptionCause::kMisalignedAccess;
                 cpu->exception_value = addr;
+                pc_updated = true;
                 break;
             }
-            cpu->mem->write32(addr, cpu->getReg(instr.rt), cpu);
+            if(!cpu->mem->write32(addr, cpu->getReg(instr.rt)))
+            {
+                cpu->exception = true;
+                cpu->cause = ExceptionCause::kOutOfBounds;
+                cpu->exception_value = addr;
+                pc_updated = true;
+                break;
+            }
             break;
         }
         case Opcode::kMovz:
@@ -356,7 +446,7 @@ void execude (CpuState* cpu, const Instruction& instr)
         }
         case Opcode::kAddi:
         {
-            cpu->setReg(instr.rt, (cpu->getReg(instr.rs) + sign_extend(instr.imm, 16)));
+            cpu->setReg(instr.rt, (cpu->getReg(instr.rs) + setx<16, 32>(instr.imm)));
             break;
         }
         case Opcode::kCls:
@@ -372,18 +462,31 @@ void execude (CpuState* cpu, const Instruction& instr)
         }
         case Opcode::kStp:
         {
-            word addr = cpu->getReg(instr.base) + sign_extend(instr.imm, 11);
+            word addr = cpu->getReg(instr.base) + setx<11, 32>(instr.imm);
             if (!isAligned(addr))
             {
                 cpu->exception = true;
                 cpu->cause = ExceptionCause::kMisalignedAccess;
                 cpu->exception_value = addr;
+                pc_updated = true;
                 break;
             }
-            cpu->mem->write32(addr, cpu->getReg(instr.rt1), cpu);
-            if (cpu->exception) { pc_updated = true; break; }
-            cpu->mem->write32(addr + 4, cpu->getReg(instr.rt2), cpu);
-            if (cpu->exception) { pc_updated = true; break; }
+            if (!cpu->mem->write32(addr, cpu->getReg(instr.rt1))) 
+            {
+                cpu->exception = true;
+                cpu->cause = ExceptionCause::kOutOfBounds;
+                cpu->exception_value = addr;
+                pc_updated = true;
+                break;
+            }
+            if (!cpu->mem->write32(addr + 4, cpu->getReg(instr.rt2)))
+            {
+                cpu->exception = true;
+                cpu->cause = ExceptionCause::kOutOfBounds;
+                cpu->exception_value = addr;
+                pc_updated = true;
+                break;
+            }
             break;
         }
         case Opcode::kJ:
@@ -394,15 +497,15 @@ void execude (CpuState* cpu, const Instruction& instr)
         }
         case Opcode::kSsat:
         {
+            int32_t value = static_cast<int32_t>(cpu->getReg(instr.rs));
             uint32_t n = instr.imm5;
-            sword value = static_cast<sword>(cpu->getReg(instr.rs));
             if (n == 0 || n >= 32)
             {
                 cpu->setReg(instr.rd, value);
                 break;
             }
-            sword max_val = (1 << (n - 1)) - 1;
-            sword min_val = -(1 << (n - 1));
+            int32_t max_val = (1 << (n - 1)) - 1;
+            int32_t min_val = -(1 << (n - 1));
             if (value > max_val) value = max_val;
             if (value < min_val) value = min_val;
             cpu->setReg(instr.rd, static_cast<word>(value));
@@ -410,14 +513,14 @@ void execude (CpuState* cpu, const Instruction& instr)
         }
         case Opcode::kSelc:
         {
-            sword a = static_cast<sword>(cpu->getReg(instr.rs1));
-            sword b = static_cast<sword>(cpu->getReg(instr.rs2));
+            int32_t a = static_cast<int32_t>(cpu->getReg(instr.rs1));
+            int32_t b = static_cast<int32_t>(cpu->getReg(instr.rs2));
             cpu->setReg(instr.rd, (a > b) ? a : b);
             break;
         }
         case Opcode::kAdd:
         {
-            cpu->setReg(instr.rd, static_cast<sword>((cpu->getReg(instr.rs)) + (cpu->getReg(instr.rt))));
+            cpu->setReg(instr.rd, static_cast<word>((cpu->getReg(instr.rs)) + (cpu->getReg(instr.rt))));
             break;
         }
         case Opcode::kMovn:
@@ -428,7 +531,7 @@ void execude (CpuState* cpu, const Instruction& instr)
         }
         case Opcode::kLi:
         {
-            sword imm = sign_extend(instr.imm, 16);
+            int32_t imm = setx<16, 32>(instr.imm);
             cpu->setReg(instr.rt, static_cast<word>(imm));
             break;
         }
@@ -446,22 +549,15 @@ void execude (CpuState* cpu, const Instruction& instr)
     if (!pc_updated) cpu->pc = old_pc + 4;
 }
 
-void SigException(CpuState* cpu, word num) 
-{
-    cpu->exception = true;
-    cpu->cause = ExceptionCause::kSystemCall;
-    cpu->exception_value = num;
-}
-
 void handle_syscall(CpuState* cpu)
 {
-    word num = cpu->getReg(8);
+    word num = cpu->syscall_num;
 
     switch (num)
     {
         case 1:
         {
-            std::cout << static_cast<sword>(cpu->getReg(0));
+            std::cout << static_cast<int32_t>(cpu->getReg(0));
             break;
         }
         case 64: 
@@ -470,7 +566,7 @@ void handle_syscall(CpuState* cpu)
             word buf = cpu->getReg(1);
             word count = cpu->getReg(2);
 
-            if (buf + count > cpu->mem->size())
+            if (buf > cpu->mem->size() || count > cpu->mem->size() - buf)
             {
                 std::cerr << "[syscall write] buffer out of bounds\n";
                 cpu->setReg(0, static_cast<word>(-1));
@@ -501,9 +597,6 @@ void handle_exception(CpuState* cpu)
 {
     switch (cpu->cause) 
     {
-        case ExceptionCause::kSystemCall:
-            handle_syscall(cpu);
-            break;
         case ExceptionCause::kMisalignedAccess:
         case ExceptionCause::kOutOfBounds:
         case ExceptionCause::kIllegalInstruction:
@@ -520,30 +613,65 @@ void handle_exception(CpuState* cpu)
     cpu->cause = ExceptionCause::kNone;
 }
 
+BasicBlock& build_bb (CpuState* cpu, word entry_pc)
+{
+    BasicBlock bb;
+    word pc = entry_pc;
+    while (true)
+    {
+        word encoding;
+        if (!cpu->mem->read32(pc, encoding)) break;
+
+        Instruction instr = decode (encoding);
+        bb.instrs.push_back(instr);
+        pc += 4;
+
+
+        if (instr.op == Opcode::kBeq ||
+            instr.op == Opcode::kJ   ||
+            instr.op == Opcode::kSyscall) break;
+
+        if (bb.instrs.size() > 256) break;
+    }
+    auto [it, _] = cpu->bb_cache.emplace(entry_pc, std::move(bb));
+    return it->second;
+}
+
 void run (CpuState* cpu)
 {
     while (!cpu->halted)
     {
-        word encoding = cpu->mem->read32(cpu->pc, cpu);
-        //cpu->dump();
+        BasicBlock* bb_ptr = nullptr;
+        auto it = cpu->bb_cache.find(cpu->pc);
+        if (it != cpu->bb_cache.end())
+        {
+            bb_ptr = &it->second;
+        } else {
+            bb_ptr = &build_bb(cpu, cpu->pc);
+            if (cpu->exception) { handle_exception(cpu); continue;}
+        }
 
-        if (cpu->exception) 
+        for (const Instruction& instr : bb_ptr->instrs) 
         {
-            handle_exception(cpu);
-            continue;
+            execute(cpu, instr);
+            if (cpu->exception || cpu->halted) break;
         }
-        Instruction instr = decode (encoding);
-        execude (cpu, instr);
-        if (cpu->exception) 
+
+        if (cpu->exception) handle_exception (cpu);
+
+        if (cpu->syscall_pending)
         {
-            handle_exception (cpu);
+            handle_syscall(cpu);
+            cpu->syscall_pending = false;
         }
+        //cpu->dump();
     }   
 }
 
+#ifndef UNIT_TESTS
 int main(int argc, char** argv)
 {
-    Memory mem(1 << 20);           // 1 МБ
+    Memory mem(1 << 20);           
     CpuState cpu;
     cpu.mem = &mem;
     cpu.pc = 0;
@@ -555,7 +683,8 @@ int main(int argc, char** argv)
 
     run(&cpu);
 
-    cpu.dump(true);
+    //cpu.dump(true);
 
     return 0;
 }
+#endif

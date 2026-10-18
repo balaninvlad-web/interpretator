@@ -1,37 +1,3 @@
-## dsl.rb
-#require_relative 'parser' # Подключаем наш будущий парсер
-#require_relative 'code'   # Подключаем генератор кода
-#
-## 1. Читаем файл с исходником
-#asm_code = File.read(ARGV[0]) 
-#
-#lines = asm_code.lines.map { |line| line.split(';').first.strip }.reject(&:empty?)
-#
-#symbol_table = {}
-#pc = 0
-#lines.each do |line|
-#    if line.end_with?(':')
-#        symbol_table[line.chomp(':')] = pc
-#    else
-#        pc += 4
-#    end
-#end
-#
-#machine_code = []
-#lines.each do |line|
-#    next if line.end_with?(':')
-#        parsed_inst = Parser.parse(line, symbol_table)
-#        bin_code = Code.generate(parsed_inst)
-#        machine_code << bin_code
-#end
-#
-#File.open("output.bin", "wb") do |f|
-#    machine_code.each do |word|
-#        f.write([word].pack('V')) # упаковка в Litle-endian
-#    end
-#end
-
-
 class Symbol 
     def to_reg = to_s[1..].to_i  # r5->"r5"->"5"->5
 end
@@ -41,21 +7,21 @@ class Integer
 end
 
 ISA = {
-  li:      { opc: 0b010001, args: %i[rt imm],                bits: { rt: [16,5], imm: [0,16] } },
-  addi:    { opc: 0b111001, args: %i[rt rs imm],             bits: { rs: [21,5], rt: [16,5], imm: [0,16] } },
-  add:     { opc: 0b000000, fn: 0b110010, args: %i[rd rs rt], bits: { rs: [21,5], rt: [16,5], rd: [11,5], fn: [0,6] } },
-  beq:     { opc: 0b111111, args: %i[rs rt offset],          bits: { rs: [21,5], rt: [16,5], offset: [0,16] } },
-  j:       { opc: 0b101111, args: %i[index],                 bits: { index: [0,26] } },
-  ld:      { opc: 0b010011, args: %i[rt base imm],           bits: { base: [21,5], rt: [16,5], imm: [0,14] } },
-  st:      { opc: 0b011110, args: %i[rt base imm],           bits: { base: [21,5], rt: [16,5], imm: [0,14] } },
-  stp:     { opc: 0b001110, args: %i[rt1 rt2 base offset],   bits: { base: [21,5], rt1: [16,5], rt2: [11,5], offset: [0,11] } },
-  movz:    { opc: 0b000000, fn: 0b011100, args: %i[rd rs rt], bits: { rs: [21,5], rt: [16,5], rd: [11,5], fn: [0,6] } },
-  movn:    { opc: 0b000000, fn: 0b000101, args: %i[rd rs rt], bits: { rs: [21,5], rt: [16,5], rd: [11,5], fn: [0,6] } },
+  li:      { opc: 0b010001, args: %i[rt imm],                   bits: { rt: [16,5], imm: [0,16] } },
+  addi:    { opc: 0b111001, args: %i[rt rs imm],                bits: { rs: [21,5], rt: [16,5], imm: [0,16] } },
+  add:     { opc: 0b000000, fn: 0b110010, args: %i[rd rs rt],   bits: { rs: [21,5], rt: [16,5], rd: [11,5], fn: [0,6] } },
+  beq:     { opc: 0b111111, args: %i[rs rt offset],             bits: { rs: [21,5], rt: [16,5], offset: [0,16] } },
+  j:       { opc: 0b101111, args: %i[index],                    bits: { index: [0,26] } },
+  ld:      { opc: 0b010011, args: %i[rt base imm],              bits: { base: [21,5], rt: [16,5], imm: [0,14] } },
+  st:      { opc: 0b011110, args: %i[rt base imm],              bits: { base: [21,5], rt: [16,5], imm: [0,14] } },
+  stp:     { opc: 0b001110, args: %i[rt1 rt2 base imm],         bits: { base: [21,5], rt1: [16,5], rt2: [11,5], imm: [0,11] } },
+  movz:    { opc: 0b000000, fn: 0b011100, args: %i[rd rs rt],   bits: { rs: [21,5], rt: [16,5], rd: [11,5], fn: [0,6] } },
+  movn:    { opc: 0b000000, fn: 0b000101, args: %i[rd rs rt],   bits: { rs: [21,5], rt: [16,5], rd: [11,5], fn: [0,6] } },
   selc:    { opc: 0b000000, fn: 0b010000, args: %i[rd rs1 rs2], bits: { rd: [21,5], rs1: [16,5], rs2: [11,5], fn: [0,6] } },
-  cls:     { opc: 0b000000, fn: 0b110011, args: %i[rd rs],    bits: { rd: [21,5], rs: [16,5], fn: [0,6] } },
-  ssat:    { opc: 0b111100, args: %i[rd rs imm5],            bits: { rd: [21,5], rs: [16,5], imm5: [11,5] } },
-  sbit:    { opc: 0b010010, args: %i[rd rs imm5],            bits: { rd: [21,5], rs: [16,5], imm5: [11,5] } },
-  syscall: { opc: 0b000000, fn: 0b011101, args: [],          bits: { fn: [0,6] } },
+  cls:     { opc: 0b000000, fn: 0b110011, args: %i[rd rs],      bits: { rd: [21,5], rs: [16,5], fn: [0,6] } },
+  ssat:    { opc: 0b111100, args: %i[rd rs imm5],               bits: { rd: [21,5], rs: [16,5], imm5: [11,5] } },
+  sbit:    { opc: 0b010010, args: %i[rd rs imm5],               bits: { rd: [21,5], rs: [16,5], imm5: [11,5] } },
+  syscall: { opc: 0b000000, fn: 0b011101, args: [],             bits: { fn: [0,6] } },
 }.freeze
 
 module Encoder

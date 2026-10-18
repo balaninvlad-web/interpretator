@@ -1,4 +1,3 @@
-# fib.rb
 require_relative 'dsl'
 
 prog do
