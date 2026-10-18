@@ -24,6 +24,8 @@ ISA = {
   syscall: { opc: 0b000000, fn: 0b011101, args: [],             bits: { fn: [0,6] } },
 }.freeze
 
+EM_TOY = 0xFF00
+
 module Encoder
     private
 
@@ -133,7 +135,7 @@ class Assembler
         ISA.key?(name) || super
     end
   
-    def save(path)
+    def save_elf(path)
         @fixups.each do |f|
         addr = @labels[f[:name]] or raise "undefined label: #{f[:name]}"
         idx  = f[:pc] / 4
@@ -143,18 +145,51 @@ class Assembler
                end
         @code[idx] |= val
         end
-    
-        File.open(path, "wb") do |f|
-            @code.each { |w| f.write([w].pack("V")) }
-        end
-        puts "→ #{path}: #{@code.length} инструкций, #{@code.length * 4} байт"
+
+        code = @code.pack("V*")
+        e_ident     = "\x7FELF".b + "\x01\x01\x01" + ("\x00" * 9)
+        e_type      = [0x02].pack("v")         
+        e_machine   = [EM_TOY].pack("v")       
+        e_version   = [1].pack("V")
+        e_entry     = [0].pack("V")            # старт с 0
+        e_phoff     = [52].pack("V")           # Phdr сразу после EHdr
+        e_shoff     = [0].pack("V")
+        e_flags     = [0].pack("V")
+        e_ehsize    = [52].pack("v")
+        e_phentsize = [32].pack("v")
+        e_phnum     = [1].pack("v")            # один PT_LOAD
+        e_shentsize = [40].pack("v")
+        e_shnum     = [0].pack("v")
+        e_shstrndx  = [0].pack("v")
+
+        ehdr = e_ident + e_type + e_machine + e_version + e_entry +
+               e_phoff + e_shoff + e_flags + e_ehsize + e_phentsize +
+               e_phnum + e_shentsize + e_shnum + e_shstrndx
+        raise "EHdr size: #{ehdr.bytesize}" unless ehdr.bytesize == 52
+
+        p_type   = [1].pack("V")               # PT_LOAD
+        p_offset = [52 + 32].pack("V")         # данные после заголовков
+        p_vaddr  = [0].pack("V")               # в память по адресу 0
+        p_paddr  = [0].pack("V")
+        p_filesz = [code.bytesize].pack("V")
+        p_memsz  = [code.bytesize].pack("V")   # нет .bss
+        p_flags  = [0x5].pack("V")             # PF_R | PF_X
+        p_align  = [4].pack("V")
+
+        phdr = p_type + p_offset + p_vaddr + p_paddr + p_filesz +
+               p_memsz + p_flags + p_align
+        raise "Phdr size: #{phdr.bytesize}" unless phdr.bytesize == 32
+
+        File.binwrite(path, ehdr + phdr + code)
+        puts "→ #{path}: ELF32, #{@code.length} инструкций, #{ehdr.bytesize + phdr.bytesize + code.bytesize} байт"
     end
+
 end
 
-def prog(path: "output.bin", &block)
+def prog(path: "output.elf", &block)
     asm = Assembler.new
     asm.instance_eval(&block)
-    asm.save(path)
+    asm.save_elf(path)
 end
 
 
