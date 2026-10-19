@@ -444,7 +444,21 @@ void handle_syscall(CpuState* cpu)
     {
         case 1:
         {
-            std::cout << static_cast<int32_t>(cpu->getReg(0));
+            std::cout << static_cast<word>(cpu->getReg(0));
+            break;
+        }
+        case 2:
+        {
+            int32_t v = 0;
+            std::cin >> v;
+            if (!std::cin)
+            {
+                std::cerr << "[syscall read_int] input failed\n";
+                cpu->setReg(0, static_cast<word>(-1));
+                std::cin.clear();
+                break;
+            }
+            cpu->setReg(0, static_cast<word>(v));
             break;
         }
         case 64: 
